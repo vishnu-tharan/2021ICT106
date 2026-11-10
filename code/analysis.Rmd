@@ -1,0 +1,604 @@
+
+---
+title: "Glioma Grading Using Clinical and Mutation Features"
+author: "2021ICT106"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+# 1. Introduction
+
+Can five gene mutation indicators help tell lower-grade glioma (LGG)
+and glioblastoma (GBM) apart better than age alone? I used the
+prepared UCI glioma dataset to compare two logistic regression models.
+
+- Model A uses age at diagnosis.
+- Model B uses age and mutation status for IDH1, TP53, ATRX, EGFR and PTEN.
+
+# 2. Setup
+
+```{r setup}
+# Load the plotting package.
+library(ggplot2)
+grade_colors <- c(LGG = "#E76F51", GBM = "#008C95")
+
+# Identify the RStudio project folder.
+root <- here::here()
+
+# Create paths for folders.
+data_dir <- file.path(root, "data")
+fig_dir <- file.path(root, "figures")
+results_dir <- file.path(root, "results")
+
+# Ensure output folders exist.
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
+
+# R Markdown settings.
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE
+)
+```
+
+# 3. Data Import
+
+```{r import-data}
+# Location of the official preprocessed UCI dataset.
+input_file <- file.path(
+  data_dir,
+  "TCGA_InfoWithGrade.csv"
+)
+
+# Give a clear error if the file is missing.
+if (!file.exists(input_file)) {
+  stop("Place TCGA_InfoWithGrade.csv inside the data folder.")
+}
+
+# Import the CSV file with its header.
+raw <- read.csv(input_file, check.names = FALSE)
+
+# All 20 gene columns from the original dataset.
+genes <- c(
+  "IDH1", "TP53", "ATRX", "PTEN", "EGFR",
+  "CIC", "MUC16", "PIK3CA", "NF1", "PIK3R1",
+  "FUBP1", "RB1", "NOTCH1", "BCOR", "CSMD3",
+  "SMARCA4", "GRIN2A", "IDH2", "FAT4", "PDGFRA"
+)
+
+# Check the expected original column names.
+expected_columns <- c(
+  "Grade",
+  "Gender",
+  "Age_at_diagnosis",
+  "Race",
+  genes
+)
+
+stopifnot(
+  nrow(raw) == 839,
+  ncol(raw) == 24,
+  identical(names(raw), expected_columns)
+)
+
+# Examine the imported data.
+dim(raw)
+head(raw)
+str(raw)
+summary(raw)
+```
+
+# 4. Data Quality Control and Preprocessing
+
+```{r cleaning}
+# Count missing values.
+missing_values <- sum(is.na(raw))
+cat("Missing values:", missing_values, "\n")
+
+# Check for identical complete rows.
+duplicate_rows <- sum(duplicated(raw))
+cat("Identical rows:", duplicate_rows, "\n")
+
+# Confirm numerical column types.
+numeric_columns <- c(
+  "Grade", "Age_at_diagnosis", genes
+)
+
+stopifnot(all(vapply(
+  raw[numeric_columns],
+  is.numeric,
+  logical(1)
+)))
+
+# Check the target uses the documented coding.
+stopifnot(all(raw$Grade %in% c(0, 1)))
+
+# Check mutation indicators only contain 0 or 1.
+for (gene in genes) {
+  stopifnot(all(raw[[gene]] %in% c(0, 1)))
+}
+
+# The official preprocessed dataset should be complete.
+if (missing_values > 0) {
+  stop("Unexpected missing data found.")
+}
+
+# Keep the original numeric target for modelling.
+df <- raw
+
+# Add readable labels for graphs and summaries.
+df$GradeLabel <- factor(
+  df$Grade,
+  levels = c(0, 1),
+  labels = c("LGG", "GBM")
+)
+
+# Save a copy with the additional readable label.
+write.csv(
+  df,
+  file.path(data_dir, "cleaned_glioma.csv"),
+  row.names = FALSE
+)
+
+# Count LGG and GBM records.
+table(df$GradeLabel)
+
+# Display class proportions.
+prop.table(table(df$GradeLabel))
+```
+
+# 5. Exploratory Data Analysis
+
+## 5.1 Distribution of Glioma Classes
+
+```{r class-distribution}
+# Convert a frequency table into a data frame.
+class_counts <- as.data.frame(
+  table(df$GradeLabel)
+)
+
+colnames(class_counts) <- c("Grade", "Count")
+
+# Create the bar chart.
+p1 <- ggplot(
+  class_counts,
+  aes(x = Grade, y = Count, fill = Grade)
+) +
+  geom_col() +
+  geom_text(
+    aes(label = Count),
+    vjust = -0.4
+  ) +
+  labs(
+    title = "Distribution of LGG and GBM Cases",
+    x = "Glioma Class",
+    y = "Number of Cases"
+  ) +
+  scale_fill_manual(values = grade_colors) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(p1)
+
+# Save the figure.
+ggsave(
+  file.path(fig_dir, "01_grade_distribution.png"),
+  plot = p1,
+  width = 7,
+  height = 5,
+  dpi = 150
+)
+```
+
+## 5.2 Age Distribution by Glioma Class
+
+```{r age-boxplot}
+# Compare age distributions using a boxplot.
+p2 <- ggplot(
+  df,
+  aes(
+    x = GradeLabel,
+    y = Age_at_diagnosis,
+    fill = GradeLabel
+  )
+) +
+  geom_boxplot() +
+  labs(
+    title = "Age at Diagnosis by Glioma Class",
+    x = "Glioma Class",
+    y = "Age at Diagnosis (Years)"
+  ) +
+  scale_fill_manual(values = grade_colors) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(p2)
+
+ggsave(
+  file.path(fig_dir, "02_age_by_grade.png"),
+  plot = p2,
+  width = 7,
+  height = 5,
+  dpi = 150
+)
+
+# Summary statistics for each group.
+aggregate(
+  Age_at_diagnosis ~ GradeLabel,
+  data = df,
+  FUN = median
+)
+```
+
+## 5.3 Mutation Frequencies for All 20 Genes
+
+```{r mutation-frequency}
+# Calculate the percentage of mutated samples
+# separately in each glioma class for every gene.
+
+mutation_rates <- do.call(
+  rbind,
+  lapply(genes, function(gene) {
+
+    lgg_rate <- mean(
+      df[[gene]][df$GradeLabel == "LGG"]
+    ) * 100
+
+    gbm_rate <- mean(
+      df[[gene]][df$GradeLabel == "GBM"]
+    ) * 100
+
+    data.frame(
+      Gene = gene,
+      Grade = factor(c("LGG", "GBM"), levels = c("LGG", "GBM")),
+      MutationPercent = c(lgg_rate, gbm_rate)
+    )
+  })
+)
+
+# Display the percentage table.
+head(mutation_rates, 10)
+
+# Save the table.
+write.csv(
+  mutation_rates,
+  file.path(results_dir, "mutation_frequencies.csv"),
+  row.names = FALSE
+)
+
+# Plot mutations for all 20 genes.
+p3 <- ggplot(
+  mutation_rates,
+  aes(
+    x = Gene,
+    y = MutationPercent,
+    fill = Grade
+  )
+) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "Mutation Frequency by Glioma Class",
+    x = "Gene",
+    y = "Mutated Samples (%)",
+    fill = "Glioma Class"
+  ) +
+  scale_fill_manual(values = grade_colors) +
+  theme_minimal()
+
+print(p3)
+
+ggsave(
+  file.path(fig_dir, "03_mutation_frequency.png"),
+  plot = p3,
+  width = 10,
+  height = 9,
+  dpi = 150
+)
+```
+
+# 6. Statistical Analysis
+
+## 6.1 IDH1 Mutation and Glioma Class
+
+```{r idh1-test}
+# Create a contingency table.
+idh1_table <- table(
+  Grade = df$GradeLabel,
+  IDH1_Mutation = df$IDH1
+)
+
+idh1_table
+
+# Test whether IDH1 mutation status and
+# the glioma class are statistically associated.
+idh1_test <- fisher.test(idh1_table)
+
+# Display the p-value and odds-ratio estimate.
+idh1_test
+cat("Exact p-value:", format(idh1_test$p.value, scientific = TRUE), "\n")
+```
+
+# 7. Machine Learning
+
+## 7.1 Split Into Training and Testing Data
+
+```{r data-split}
+# Set a fixed random seed for reproducibility.
+set.seed(123)
+
+# Find row indices for each class.
+lgg_ids <- which(df$Grade == 0)
+gbm_ids <- which(df$Grade == 1)
+
+# Select approximately 80% within each class.
+train_lgg <- sample(
+  lgg_ids,
+  floor(0.8 * length(lgg_ids))
+)
+
+train_gbm <- sample(
+  gbm_ids,
+  floor(0.8 * length(gbm_ids))
+)
+
+# Combine selected indices.
+train_ids <- sort(c(train_lgg, train_gbm))
+
+# Create independent training and test subsets.
+train <- df[train_ids, ]
+test <- df[-train_ids, ]
+
+# Verify their sizes.
+cat("Training samples:", nrow(train), "\n")
+cat("Testing samples:", nrow(test), "\n")
+
+# Display the class distribution in each subset.
+table(train$GradeLabel)
+table(test$GradeLabel)
+
+stopifnot(nrow(train) == 670)
+stopifnot(nrow(test) == 169)
+```
+
+## 7.2 Model A: Age Only
+
+```{r age-model}
+# Logistic regression using just age.
+model_age <- glm(
+  Grade ~ Age_at_diagnosis,
+  data = train,
+  family = binomial()
+)
+
+# Inspect fitted coefficients.
+summary(model_age)
+```
+
+## 7.3 Model B: Age and Selected Gene Mutations
+
+The model uses IDH1, TP53 and ATRX, which were more often mutated in LGG, and EGFR and PTEN, which were more often mutated in GBM. This gives the model a small set of genes with patterns in both groups.
+
+```{r full-model}
+# The second model uses age and five genes.
+# Mutation columns are binary indicators (0 or 1).
+
+model_genes <- glm(
+  Grade ~ Age_at_diagnosis +
+    IDH1 +
+    TP53 +
+    ATRX +
+    EGFR +
+    PTEN,
+  data = train,
+  family = binomial()
+)
+
+# View coefficients and statistical information.
+summary(model_genes)
+```
+
+## 7.4 Generate Test Predictions
+
+```{r predictions}
+# Predict probabilities of GBM for the test set.
+
+prob_age <- predict(
+  model_age,
+  newdata = test,
+  type = "response"
+)
+
+prob_genes <- predict(
+  model_genes,
+  newdata = test,
+  type = "response"
+)
+
+# Confirm probabilities are valid.
+stopifnot(
+  all(is.finite(prob_age)),
+  all(is.finite(prob_genes)),
+  all(prob_age >= 0 & prob_age <= 1),
+  all(prob_genes >= 0 & prob_genes <= 1)
+)
+
+# Display some predicted probabilities.
+head(prob_genes)
+```
+
+# 8. Model Evaluation
+
+## 8.1 Evaluation Function
+
+```{r evaluation-function}
+# This function calculates performance for either model.
+# The positive class is GBM.
+
+evaluate_model <- function(actual, probabilities, name) {
+
+  # Convert probabilities into 0/1 predictions.
+  predicted <- ifelse(probabilities >= 0.5, 1, 0)
+
+  # Create confusion matrix with a fixed class order.
+  cm <- table(
+    Actual = factor(
+      actual,
+      levels = c(0, 1),
+      labels = c("LGG", "GBM")
+    ),
+    Predicted = factor(
+      predicted,
+      levels = c(0, 1),
+      labels = c("LGG", "GBM")
+    )
+  )
+
+  # Extract confusion matrix components.
+  TP <- cm["GBM", "GBM"]
+  TN <- cm["LGG", "LGG"]
+  FP <- cm["LGG", "GBM"]
+  FN <- cm["GBM", "LGG"]
+
+  # Avoid division-by-zero errors.
+  safe_divide <- function(a, b) {
+    if (b == 0) return(NA_real_)
+    a / b
+  }
+
+  # Calculate metrics.
+  accuracy <- safe_divide(TP + TN, sum(cm))
+  precision <- safe_divide(TP, TP + FP)
+  recall <- safe_divide(TP, TP + FN)
+  specificity <- safe_divide(TN, TN + FP)
+
+  # Calculate the F1-score.
+  if (
+    is.na(precision) ||
+    is.na(recall) ||
+    precision + recall == 0
+  ) {
+    f1 <- NA_real_
+  } else {
+    f1 <- 2 * precision * recall / (precision + recall)
+  }
+
+  # Return evaluation results.
+  list(
+    confusion = cm,
+    metrics = data.frame(
+      Model = name,
+      Accuracy = round(accuracy, 4),
+      Precision = round(precision, 4),
+      Recall = round(recall, 4),
+      Specificity = round(specificity, 4),
+      F1 = round(f1, 4)
+    )
+  )
+}
+```
+
+## 8.2 Evaluate Both Models
+
+```{r model-comparison}
+# Evaluate baseline age-only model.
+eval_age <- evaluate_model(
+  test$Grade,
+  prob_age,
+  "Age only"
+)
+
+# Evaluate age + mutation model.
+eval_genes <- evaluate_model(
+  test$Grade,
+  prob_genes,
+  "Age + 5 genes"
+)
+
+# Combine metric tables.
+comparison <- rbind(
+  eval_age$metrics,
+  eval_genes$metrics
+)
+
+# Display and save the comparison.
+knitr::kable(comparison, digits = 4)
+
+write.csv(
+  comparison,
+  file.path(results_dir, "model_comparison.csv"),
+  row.names = FALSE
+)
+```
+
+## 8.3 Confusion Matrix for Main Model
+
+```{r confusion-matrix}
+# Print the actual and predicted classes.
+eval_genes$confusion
+
+# Save the matrix as a CSV file.
+write.csv(
+  as.data.frame.matrix(eval_genes$confusion),
+  file.path(results_dir, "confusion_matrix.csv")
+)
+```
+
+## 8.4 Visualise the Confusion Matrix
+
+```{r confusion-figure}
+cm_df <- as.data.frame(eval_genes$confusion)
+
+p4 <- ggplot(
+  cm_df,
+  aes(
+    x = Predicted,
+    y = Actual,
+    fill = Freq
+  )
+) +
+  geom_tile() +
+  geom_text(
+    aes(label = Freq),
+    color = "white",
+    size = 6
+  ) +
+  scale_fill_gradient(low = "#17324A", high = "#33709D") +
+  labs(
+    title = "Confusion Matrix: Age and Gene Model",
+    x = "Predicted Class",
+    y = "Actual Class"
+  ) +
+  theme_minimal()
+
+print(p4)
+
+ggsave(
+  file.path(fig_dir, "04_confusion_matrix.png"),
+  plot = p4,
+  width = 7,
+  height = 5,
+  dpi = 150
+)
+```
+
+# 9. What the results show
+
+IDH1 mutations were much more common in the LGG group. Fisher's
+exact test shows an association between IDH1 status and recorded grade.
+
+On the same 169 test cases, the age-only model got 123 right and the
+age-plus-five-gene model got 145 right. The second model found 64 of
+71 GBM cases, compared with 48 for age alone.
+
+This comparison uses one split of a historical dataset. Testing on a
+separate dataset would help show whether the results hold elsewhere.
+
+# 10. Reproducibility Information
+
+```{r session-info}
+# Record R and package versions.
+sessionInfo()
+```
